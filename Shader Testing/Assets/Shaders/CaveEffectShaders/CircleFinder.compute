@@ -1,0 +1,117 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+#define MAX_LOOP 5000
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+Texture2D<float4> inTex;
+uint colorCount;
+StructuredBuffer<float4> colorBuffer;
+RWStructuredBuffer<uint> outputData;
+
+bool ColorEqual(float4 col1, float4 col2){
+    if(abs (col1.r-col2.r)<.01f){
+    if(abs (col1.b-col2.b)<.01f){
+    if(abs (col1.g-col2.g)<.01f){
+        return true;
+    }}}
+    return false;
+    /*
+    float epsilon = 0.001f;
+    bool colorsMatch = length(abs(col1.rgb - col2.rgb)) < epsilon;
+    return colorsMatch;*/
+}
+
+//in order distance from edge, y, x
+//x gets the most bits because it has the largest possible value, as screens are wider than they are tall, and the max distance from the center is height/2
+//THIS MIGHT MESS UP ON A 4K MONITOR, MIGHT NEED TO COMPRESS DATA MORE.
+//EVIL STYLE CODE
+uint PackageData(uint val1, uint val2, uint val3){
+    uint packedData = 0;
+    packedData |= ((val1 & 0x3FF) <<32-10);
+    packedData |= ((val2 & 0x7FF) <<32-21);
+    packedData |= ((val3 & 0x7FF) <<32-32);
+    return packedData;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint2 textureDimensions;
+    inTex.GetDimensions(textureDimensions.x, textureDimensions.y);
+    
+    //for(int j = 0; j < 10; j++){
+        float4 color = inTex[id.xy];
+        bool turnOff = false;
+        //if black pixel, quit
+        //we need to do it this way because hlsl needs all if statments to evaluate to scalars, and direct color comparisons don't work.
+        if(ColorEqual(color,float4(0,0,0,0))){
+            //outputData[0] = 50;
+            return;//end this thread early, nothing will be done
+        }
+        //find color index
+        int colorIndex = colorCount + 5;
+        for(uint i = 0; i < colorCount; i++){
+            //if(color.r == colorBuffer[i].r && color.g == colorBuffer[i].g && color.b == colorBuffer[i].b){
+            if(ColorEqual(color,colorBuffer[i])){
+                colorIndex = i;
+            }
+        }
+        // Define a small epsilon for comparison (since colors are represented as floats, we use a tolerance)
+        /*if(ColorEqual(color, colorBuffer[2])){
+            outputData[0] = 20;
+        }*/
+
+        float maxDist = 0;
+        bool foundEdge = false;
+        //return;
+        //while(foundEdge == false){//id.x + maxDist < textureDimensions.x && id.x - maxDist > 0 && id.y + maxDist < textureDimensions.y && id.y-maxDist > 0 && foundEdge == false){
+        for(int n = 0; n < MAX_LOOP && foundEdge == false; n++){
+            maxDist++;
+            for(int i = -1; i <= 1; i++){
+                for(int j = -1; j <= 1; j++){
+                    if(i!=0 || j != 0){
+                        uint2 compVal = id.xy + uint2(i*n,j*n);
+                        if(!ColorEqual(inTex[compVal],color)){
+                            //Result[id.xy] = (float4(n,0,0,1));
+                            //return;
+                            foundEdge = true;
+                        }
+                    }
+                }
+            }
+        }
+        float temp = maxDist/MAX_LOOP;
+        float4 returnVal = float4(temp,id.x,id.y,1);
+        //Result[id.xy] = returnVal;
+        //outputData[id.y *textureDimensions.x + id.x] = int3(id.x,id.y,maxDist);
+        //store maxDist in first 10 bits
+        uint packagedData = PackageData(maxDist,id.y,id.x);
+        InterlockedMax(outputData[colorIndex], packagedData);//(uint)colorBuffer[colorIndex].r);//29360128);//maxDist);
+
+        //outputData[0] = int3(id.x,id.y,maxDist);
+
+
+        //try InterlockedMax z, and have each thread compare to see if it's z is the interlocked one, if it is, set the xy cooords
+            /*
+            int coloredNeighbors = 0;
+            //evil style code, fix this
+            if(ColorEqual(inTex[id.xy + uint2(-1,-1)], inTex[id.xy])){coloredNeighbors++;}
+
+            if(coloredNeighbors == 0){
+                turnOff = true;
+            }*/
+        
+        /*
+        ImageMemoryBarrier(resultImage, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        if(turnOff){
+            inTex[id.xy] = float4(0,0,0,1);
+        }
+        ImageMemoryBarrier(resultImage, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        */
+        
+    //}
+    
+    
+}

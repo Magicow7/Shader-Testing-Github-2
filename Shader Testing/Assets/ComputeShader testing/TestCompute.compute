@@ -1,0 +1,66 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+#define THREAD_GROUP_SIZE 256
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+StructuredBuffer<int> inputData;
+// Output buffer to hold the final sum
+RWStructuredBuffer<int> outputData;
+
+// Total number of integers to sum
+uint totalCount;
+
+// Shared memory array for partial sums
+//unity does this differently from other platforms
+//shared int partialSum[THREAD_GROUP_SIZE]; // This is how to declare shared memory in Unity
+//use groupshared, not shared
+groupshared int partialSum[THREAD_GROUP_SIZE];
+
+// Output buffer to hold the final sum
+//RWStructuredBuffer<int> outputData;
+
+//this means each thread corrosponds to a certain item in the input dataset
+//8,8,1 is generally for image processing
+//using 1 1 1 means each sublist is independent, might be worth spliting up if sublists are big
+//ACTUALLY we should be using 64 threads since that is the minimum on AMD hardware, the most of any hardware
+//so without 64 threads, we just have idle ones by default.
+[numthreads(THREAD_GROUP_SIZE,1,1)]
+//SV_DispatchThreadID is stored as  ([(SV_GroupID) * (numthreads)] + (SV_GroupThreadID))
+void CSMain (uint3 id : SV_DispatchThreadID, 
+            uint3 groupID : SV_GroupID, 
+            uint3 localID : SV_GroupThreadID)
+{
+    if(id.x >= totalCount){
+        partialSum[localID.x] = 0;
+    }else{
+        partialSum[localID.x] = inputData[id.x];
+    }
+
+    //outputData[id.x] = inputData[id.x] + 5 ;
+    
+
+    // Ensure all threads have loaded their data
+
+
+    // Perform reduction in shared memory
+    for (uint stride = THREAD_GROUP_SIZE / 2; stride > 0; stride >>= 1)
+    {
+        GroupMemoryBarrierWithGroupSync();
+        if (localID.x < stride)
+        {
+            partialSum[localID.x] += partialSum[localID.x + stride];
+        }
+         // Sync threads to ensure all calculations are done
+    }
+    //GroupMemoryBarrierWithGroupSync();
+    // Write the final result to output
+    if (localID.x == 0)
+    {
+        outputData[groupID.x] = partialSum[0]; // The final sum is stored at index 0
+    }
+
+
+}
