@@ -121,6 +121,7 @@ public class DepthPostEffects : MonoBehaviour
         float[] radii = new float[BoidColorList.Count];
 
         //get out data from compute buffer
+        /*
         long[] outputData = new long[BoidColorList.Count];
         outputBuffer.GetData(outputData);
         for(int n = 0; n < BoidColorList.Count; n++){
@@ -142,6 +143,7 @@ public class DepthPostEffects : MonoBehaviour
             //xPos -= 0.5f;
             //Debug.Log(n + ":" + max + "is max, " +xPos+" is x, " + yPos + " is y");
         }
+        */
         
         //Debug.Log(maskRT.width + "and" + maskRT.height);
 

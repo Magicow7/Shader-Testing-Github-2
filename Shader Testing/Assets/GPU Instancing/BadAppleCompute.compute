@@ -1,0 +1,205 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+RWTexture2D<float4> BadAppleTexture;  // RWTexture for writing output
+RWStructuredBuffer<float4x4> instancePositions; // Output buffer for instance data
+RWStructuredBuffer<float4> movementDirections;
+RWBuffer<float> timeBuffer; // Declare the buffer that will hold the time value
+
+float2 FindTexturePosFromMatrix(float4x4 inMatrix){
+    //find pixel coord of instance in bad apple video
+    uint2 textureDimensions;
+    BadAppleTexture.GetDimensions(textureDimensions.x, textureDimensions.y);
+    //half of 1280x720 in each direction
+    float2 worldDimensions = float2(6.4,3.6);
+    float3 worldPosition = float3(inMatrix._14,inMatrix._24,inMatrix._34);
+    //value between 0 and 1 in each direction
+    float2 ratioPosition = float2(smoothstep(-worldDimensions.x, worldDimensions.x, worldPosition.x),smoothstep(-worldDimensions.y, worldDimensions.y, worldPosition.z));
+    float2 texturePos = float2(floor(ratioPosition.x * textureDimensions.x), floor(ratioPosition.y * textureDimensions.y));
+    return texturePos;
+}
+
+
+float AngleBetweenVectors(float3 vectorA, float3 vectorB)
+{
+    // Calculate the dot product of the two vectors
+    float dotProduct = dot(vectorA, vectorB);
+    
+    // Calculate the magnitudes of the vectors
+    float magnitudeA = length(vectorA);
+    float magnitudeB = length(vectorB);
+    
+    // Calculate the cosine of the angle
+    float cosTheta = dotProduct / (magnitudeA * magnitudeB);
+    
+    // Clamp the value of cosTheta to avoid any numerical errors (it should be between -1 and 1)
+    cosTheta = clamp(cosTheta, -1.0f, 1.0f);
+    
+    // Calculate and return the angle in radians
+    return acos(cosTheta);
+}
+//helper functions
+float4x4 CreateRotationMatrix(float angle)
+{
+    //angle = 0;
+    float cosAngle = cos(angle);
+    float sinAngle = sin(angle);
+
+    return float4x4(
+        cosAngle, 0.0, sinAngle, 0.0,    // First row
+        0.0,     1.0, 0.0,     0.0,    // Second row
+        -sinAngle, 0.0, cosAngle, 0.0,   // Third row
+        0.0,     0.0, 0.0,     1.0     // Fourth row (homogeneous)
+    );
+}
+
+float4x4 RotateMatrixToFaceDirection(float4x4 transformMatrix, float3 direction)
+{
+    float4x4 returnMatrix = transformMatrix;
+    float3 currForward = float3(transformMatrix._13, transformMatrix._23,transformMatrix._33);
+    float angle = AngleBetweenVectors(normalize(direction), normalize(currForward));
+
+    float4x4 temp = mul(transformMatrix, CreateRotationMatrix(angle));
+    returnMatrix._11 = temp._11;
+    returnMatrix._12 = temp._12;
+    returnMatrix._13 = temp._13;
+    returnMatrix._21 = temp._21;
+    returnMatrix._22 = temp._22;
+    returnMatrix._23 = temp._23;
+    returnMatrix._31 = temp._31;
+    returnMatrix._32 = temp._32;
+    returnMatrix._33 = temp._33;
+
+    return returnMatrix;
+}
+
+//return density value at position, and -1 if position is illegal
+float CheckDensityAtPoint(float2 texturePos, float2 xBounds, float2 yBounds){
+    if(texturePos.x <= xBounds.x || texturePos.x >= xBounds.y || texturePos.y <= yBounds.x || texturePos.y >= yBounds.y){
+        return -1;
+    }
+    float4 pixelColor = BadAppleTexture[texturePos];
+    float averageColor = (pixelColor.x + pixelColor.y + pixelColor.z)/3;
+    if(averageColor < 0.5){
+        return -1;
+    }
+    return 0;
+}
+
+
+
+//basic 8 direction cardinal direction check out 500 steps, could be optimized
+float3 GetDirectionTowardsLegalSpace(float2 texturePos, uint2 textureDimensions){
+    //return float3(-texturePos.x,0, -texturePos.y);
+    float3 returnDir = float3(0,0,0);
+    bool foundEdge = false;
+    for(int step = 1;step < 500 && !foundEdge; step++){
+        for(int i = -1; i < 2; i++){
+            for(int j = -1; j < 2; j++){
+                if(!(i==0 && j == 0)){
+                    //we don't use GetDensityAtNextPosition because thats in world space and this is in texture space.
+                    float newPointDensity = CheckDensityAtPoint(texturePos + float2(i * step, j * step), float2(0, textureDimensions.x), float2(0, textureDimensions.y));
+                    if(newPointDensity != -1){
+                        returnDir = float3(i * 5,0,j * 5);
+                        foundEdge = true;
+                    }
+                }
+            }
+        }
+    }
+    return returnDir;
+
+}
+
+//get the density at a world space after a translation given a transformation and translation, if translation is zero vector, checking center point
+float GetDensityAtNextPosition(float4x4 inMatrix, float3 translation, uint2 textureDimensions){
+    float4x4 tempMatrix = inMatrix;
+    tempMatrix._14 += translation.x;
+    tempMatrix._24 += translation.y;
+    tempMatrix._34 += translation.z;
+
+    float2 texturePos = FindTexturePosFromMatrix(tempMatrix);
+    
+    float centerDensity = CheckDensityAtPoint(texturePos, float2(0, textureDimensions.x), float2(0, textureDimensions.y));
+
+    return centerDensity;
+}
+
+//we can't just read column 3, because the scale is encoded in the diagonal, so we need to decode it.
+float3 GetZForwardFromMatrix(float4x4 inMatrix)
+{
+    // Extract the forward direction (third column)
+    float3 forward = float3(inMatrix._13, inMatrix._23, inMatrix._33);
+
+    // Compute the scale factor (just the length of the diagonal)
+    float3 scale = float3(length(float3(inMatrix._11, inMatrix._12, inMatrix._13)),
+                         length(float3(inMatrix._21, inMatrix._22, inMatrix._23)),
+                         length(float3(inMatrix._31, inMatrix._32, inMatrix._33)));
+
+    // Remove scale by normalizing the forward vector
+    forward /= scale.z; // Assuming we are removing the scale from the Z-axis
+
+    return normalize(forward); // Normalize to ensure the result is a unit vector
+}
+
+[numthreads(64, 1, 1)]  // The number of threads per group
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint2 textureDimensions;
+    BadAppleTexture.GetDimensions(textureDimensions.x, textureDimensions.y);
+
+    //this is being called twice, once here and once in the next line, it could be optimized
+    float2 texturePos = FindTexturePosFromMatrix(instancePositions[id.x]);
+
+    float centerDensity = GetDensityAtNextPosition(instancePositions[id.x], float3(0,0,0), textureDimensions);
+
+    float3 currForward = GetZForwardFromMatrix(instancePositions[id.x]);
+
+    float3 accumulatedDirection = float3(0,0,0);//float3(instancePositions[id.x]._13,instancePositions[id.x]._23,instancePositions[id.x]._33);  // Extract the third column (forward vector)
+    if(centerDensity == -1){
+        //currently in illegal area (happens when bad apple color swaps), ignore density and speed towards legal area
+        accumulatedDirection = GetDirectionTowardsLegalSpace(texturePos, textureDimensions);
+        //accumulatedDirection = float3(-instancePositions[id.x]._14,-instancePositions[id.x]._24,-instancePositions[id.x]._34);
+    }else{
+        //in legal area, take density into account and steer
+        //TODO: Implement steering
+        //for now, randomize direction when next step will be in illegal space 
+        float nextDensity = GetDensityAtNextPosition(instancePositions[id.x], currForward * timeBuffer[0], textureDimensions);
+        if(nextDensity == -1){
+            //accumulatedDirection = currForward;
+            float angle = 2.0 * 3.14159 * frac(sin(timeBuffer[0] * 43758.5453) * 10000.0); // Random angle
+            //float radius = uv.y; // Random magnitude
+
+            // Calculate the random direction in the X-Z plane
+            float3 randomDirection3D = float3(cos(angle), 0.0,sin(angle));
+
+            // Optional: If you want to scale the magnitude
+            //randomDirection3D *= radius;
+
+            // Ensure the vector is normalized if you need a unit vector
+            randomDirection3D = normalize(randomDirection3D);
+            accumulatedDirection = randomDirection3D;
+        }else{
+            accumulatedDirection = currForward;
+        }
+    }
+    
+    
+    //rotate towards moving direction
+    instancePositions[id.x] = RotateMatrixToFaceDirection(instancePositions[id.x], accumulatedDirection);
+    //accumulatedDirection = float3(0,0,0);
+    //translate towards Z-forward
+    float3 forward = accumulatedDirection;  // Extract the third column (forward vector)
+    float3 translation = forward * timeBuffer[0];
+    instancePositions[id.x]._14 += translation.x;
+    //y should be used, if it is something is wrong
+    instancePositions[id.x]._24 += translation.y;
+    instancePositions[id.x]._34 += translation.z;
+    
+    
+    
+    
+    
+}
+
+

@@ -7,6 +7,8 @@ public class BoidHandler : MonoBehaviour
     public DepthPostEffects postEffectsController;
 
     public Camera playerCam;
+
+    public GameObject stalkPoint;
     private const float G = 500f;
 
     public GameObject boidObject;
@@ -16,6 +18,8 @@ public class BoidHandler : MonoBehaviour
     BodyProperty[] bp;
 
     public int numberOfSphere = 50;
+
+    public float startSpawnDistance = 50;
 
     public float speed;
 
@@ -34,17 +38,26 @@ public class BoidHandler : MonoBehaviour
 
     public float recenterStrength;
 
+    public float visionDistance = 15;
+
     
     public float stalkSpeed;
 
     public float retreatSpeed;
+
+    public float maxRetreatDistance;
     public Vector3 centerPoint;
 
     public bool visible;
 
+    public Vector2 scarinessSmoothingVals;
+    public Vector2 scarinessMinMax;
+
     public bool drawDebugLines;
 
     TrailRenderer trailRenderer;
+
+    public Material CircleDeformMat;
 
     struct BodyProperty // why struct?
 
@@ -55,8 +68,28 @@ public class BoidHandler : MonoBehaviour
         public Vector3 acceleration;
 
         public bool retreating;
+
+        public Material material;
         
 
+    }
+
+    Vector3 GetRandomDirectionXZ()
+    {
+        // Generate a random angle in radians
+        float angle = Random.Range(0f, Mathf.PI * 2f);
+
+        // Calculate the X and Z components using cosine and sine
+        float x = Mathf.Cos(angle);
+        float z = Mathf.Sin(angle);
+
+        // Return the vector in the XZ plane
+        return new Vector3(x, 0f, z);
+    }
+
+    void RestartBoidPosition(GameObject g){
+        Vector3 randDir = GetRandomDirectionXZ() + new Vector3(0, Random.Range(-0.3f,0.3f), 0);
+        g.transform.position = playerCam.transform.position + randDir.normalized * startSpawnDistance * (float)Random.Range(1f,3f);
     }
 
 
@@ -105,6 +138,7 @@ public class BoidHandler : MonoBehaviour
 
             //if(i == 0){
             body[i].GetComponent<Renderer>().material = newMaterial;
+            bp[i].material = newMaterial;
             //}
 
             // https://docs.unity3d.com/ScriptReference/GameObject.CreatePrimitive.html
@@ -121,9 +155,7 @@ public class BoidHandler : MonoBehaviour
 
 
             //body[i].transform.position = new Vector3( Random.Range(10,-10), Random.Range(10,-10), 180);
-            float temp = Random.Range(0f,1f);
-            temp *= Mathf.PI * 2;
-            body[i].transform.position = new Vector3(Random.Range(-5,5),Random.Range(-5,5), Random.Range(-5,5));
+            RestartBoidPosition(body[i]);
 
             // z = 180 to see this happen in front of me. Try something else (randomize) too.
 
@@ -173,6 +205,7 @@ public class BoidHandler : MonoBehaviour
     void FixedUpdate()
 
     {
+        float minDist = 1000;
 
         for (int i = 0; i < numberOfSphere; i++)
 
@@ -184,16 +217,40 @@ public class BoidHandler : MonoBehaviour
 
         for (int i = 0; i < numberOfSphere; i++)
         {
-            bp[i].retreating = IsPositionInView(playerCam, body[i].transform.position);
+            float dist = Vector3.Distance(body[i].transform.position, playerCam.transform.position);
+            if(dist < minDist){
+                minDist = dist;
+            }
+            //set scariness based on distance
+
+            if(bp[i].retreating == false){
+                bp[i].retreating = IsPositionInView(playerCam, body[i].transform.position) && 
+                Vector3.Distance(body[i].transform.position, playerCam.transform.position) < visionDistance;
+            }
+            
+            
 
             bp[i].acceleration += Cohesion(body[i]) * cohesionStrength;
             bp[i].acceleration += Alignment(body[i], bp[i].velocity) * alignmentStrength;
             bp[i].acceleration += Avoidance(body[i]) * avoidanceStrength;
-            bp[i].acceleration += Recenter(body[i]) * recenterStrength;
-            if(!bp[i].retreating){
-                bp[i].acceleration += Stalk(body[i]) * stalkSpeed;
-            }else{
+            //bp[i].acceleration += Recenter(body[i]) * recenterStrength;
+
+            if(Vector3.Distance(body[i].transform.position, playerCam.transform.position) >  maxRetreatDistance && bp[i].retreating){
+                bp[i].retreating = false;
+                RestartBoidPosition(body[i]);
+
+            }
+
+            //if boid inside player
+            if(Vector3.Distance(body[i].transform.position, playerCam.transform.position) < 0.3f){
+                bp[i].retreating = false;
+                RestartBoidPosition(body[i]);
+            }
+
+            if(bp[i].retreating){
                 bp[i].acceleration += -Stalk(body[i]) * retreatSpeed;
+            }else{
+                bp[i].acceleration += Stalk(body[i]) * stalkSpeed;
             }
             
 
@@ -217,6 +274,8 @@ public class BoidHandler : MonoBehaviour
             body[i].transform.position += bp[i].velocity * Time.deltaTime;
 
         }
+
+        UpdateDeformMesh(minDist);
         /*
         Camera.main.transform.position = body[0].transform.position;
         Camera.main.transform.LookAt(body[0].transform.position + bp[0].velocity);*/
@@ -229,6 +288,19 @@ public class BoidHandler : MonoBehaviour
         }
         postEffectsController.metaballs = m;*/
 
+    }
+
+    private void UpdateDeformMesh(float minDist){
+        float smoothedDist = 1-RatioClamp(scarinessSmoothingVals.x, scarinessSmoothingVals.y, minDist);
+        float distortionVal = Mathf.Lerp(scarinessMinMax.x, scarinessMinMax.y, smoothedDist);
+        CircleDeformMat.SetFloat("_DistortionStrength", distortionVal);
+    }
+
+    float RatioClamp(float min, float max, float t)
+    {
+        if (t <= min) return 0f;
+        if (t >= max) return 1f;
+        return (t - min) / (max - min);
     }
 
 
@@ -292,6 +364,11 @@ public class BoidHandler : MonoBehaviour
                 avoidanceVector += (a.transform.position - body[i].transform.position);
             }
         }
+        //add player to avoidance
+        if (Vector3.Distance(playerCam.transform.position, a.transform.position) < avoidanceRadius)
+            {
+                avoidanceVector += (playerCam.transform.position - a.transform.position);
+            }
 
         return avoidanceVector.normalized * speed;
     }
@@ -308,7 +385,7 @@ public class BoidHandler : MonoBehaviour
     }
 
     private Vector3 Stalk(GameObject a){
-        Vector3 playerDirection = playerCam.transform.position - a.transform.position;
+        Vector3 playerDirection = stalkPoint.transform.position - a.transform.position;
         return playerDirection;
     }
 
