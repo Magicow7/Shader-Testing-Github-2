@@ -1,15 +1,20 @@
 // Each #kernel tells which function to compile; you can have many kernels
 #pragma kernel CSMain
+#pragma kernel CSMain2
+#pragma kernel VisualizeDensityMap
 
 RWTexture2D<float4> BadAppleTexture;  // RWTexture for writing output
 RWStructuredBuffer<float4x4> instancePositions; // Output buffer for instance data
-RWStructuredBuffer<float4> movementDirections;
+//density sensitivity in R, speed in G, lookahead dist in B
+RWStructuredBuffer<float4> instanceTraits;
 RWBuffer<float> timeBuffer; // Declare the buffer that will hold the time value
+//this is uint instead of float4 because we are storing a density value that needs to use interlock add
+RWTexture2D<uint> DensityTexture;
+RWTexture2D<float4> DensityVisualizeTexture;
+uint instanceCount;
 
-float2 FindTexturePosFromMatrix(float4x4 inMatrix){
-    //find pixel coord of instance in bad apple video
-    uint2 textureDimensions;
-    BadAppleTexture.GetDimensions(textureDimensions.x, textureDimensions.y);
+
+float2 FindTexturePosFromMatrix(float4x4 inMatrix, uint2 textureDimensions){
     //half of 1280x720 in each direction
     float2 worldDimensions = float2(6.4,3.6);
     float3 worldPosition = float3(inMatrix._14,inMatrix._24,inMatrix._34);
@@ -17,6 +22,17 @@ float2 FindTexturePosFromMatrix(float4x4 inMatrix){
     float2 ratioPosition = float2(smoothstep(-worldDimensions.x, worldDimensions.x, worldPosition.x),smoothstep(-worldDimensions.y, worldDimensions.y, worldPosition.z));
     float2 texturePos = float2(floor(ratioPosition.x * textureDimensions.x), floor(ratioPosition.y * textureDimensions.y));
     return texturePos;
+}
+
+float2 Rotate2D(float2 v, float angle) {
+    float cosTheta = cos(angle);
+    float sinTheta = sin(angle);
+    float2x2 rotationMatrix = float2x2(
+        cosTheta, -sinTheta,
+        sinTheta, cosTheta
+    );
+
+    return mul(v, rotationMatrix);  // Multiply vector by the rotation matrix
 }
 
 
@@ -74,7 +90,7 @@ float4x4 RotateMatrixToFaceDirection(float4x4 transformMatrix, float3 direction)
 }
 
 //return density value at position, and -1 if position is illegal
-float CheckDensityAtPoint(float2 texturePos, float2 xBounds, float2 yBounds){
+uint CheckDensityAtPoint(float2 texturePos, float2 xBounds, float2 yBounds){
     if(texturePos.x <= xBounds.x || texturePos.x >= xBounds.y || texturePos.y <= yBounds.x || texturePos.y >= yBounds.y){
         return -1;
     }
@@ -83,7 +99,7 @@ float CheckDensityAtPoint(float2 texturePos, float2 xBounds, float2 yBounds){
     if(averageColor < 0.5){
         return -1;
     }
-    return 0;
+    return DensityTexture[texturePos];
 }
 
 
@@ -98,7 +114,7 @@ float3 GetDirectionTowardsLegalSpace(float2 texturePos, uint2 textureDimensions)
             for(int j = -1; j < 2; j++){
                 if(!(i==0 && j == 0)){
                     //we don't use GetDensityAtNextPosition because thats in world space and this is in texture space.
-                    float newPointDensity = CheckDensityAtPoint(texturePos + float2(i * step, j * step), float2(0, textureDimensions.x), float2(0, textureDimensions.y));
+                    uint newPointDensity = CheckDensityAtPoint(texturePos + float2(i * step, j * step), float2(0, textureDimensions.x), float2(0, textureDimensions.y));
                     if(newPointDensity != -1){
                         returnDir = float3(i * 5,0,j * 5);
                         foundEdge = true;
@@ -112,15 +128,15 @@ float3 GetDirectionTowardsLegalSpace(float2 texturePos, uint2 textureDimensions)
 }
 
 //get the density at a world space after a translation given a transformation and translation, if translation is zero vector, checking center point
-float GetDensityAtNextPosition(float4x4 inMatrix, float3 translation, uint2 textureDimensions){
+uint GetDensityAtNextPosition(float4x4 inMatrix, float3 translation, uint2 textureDimensions){
     float4x4 tempMatrix = inMatrix;
     tempMatrix._14 += translation.x;
     tempMatrix._24 += translation.y;
     tempMatrix._34 += translation.z;
 
-    float2 texturePos = FindTexturePosFromMatrix(tempMatrix);
+    float2 texturePos = FindTexturePosFromMatrix(tempMatrix, textureDimensions);
     
-    float centerDensity = CheckDensityAtPoint(texturePos, float2(0, textureDimensions.x), float2(0, textureDimensions.y));
+    uint centerDensity = CheckDensityAtPoint(texturePos, float2(0, textureDimensions.x), float2(0, textureDimensions.y));
 
     return centerDensity;
 }
@@ -142,6 +158,14 @@ float3 GetZForwardFromMatrix(float4x4 inMatrix)
     return normalize(forward); // Normalize to ensure the result is a unit vector
 }
 
+//TODO:
+//create a compute shader to make a density texture that can be refrenced, each boid will try to move in a direction that minimizes density, 
+//while prioritizing moving in the same direction they have been, each boid will have a value of how sensitive they are to density, the more sensityive, the more it tries to minimize it.
+//when in an illegal position, replace density map with a distance from edge (Cool idea, don't think it would work, the trailing boids would cluster and create their own edge in illegal space)
+//try to find a better way to find the direction towards the closest edge, look at waveform propogation with a low resolution texture.
+
+//WE DON"T NEED THE CLOSEST EDGE POINT, just a close one, so we can approximate. do the cardinal direction check with more directions, or look into 
+//the fibonnaci/golden ration check from sebastian lague's boid video for equidistance points spread out on a circle.
 [numthreads(64, 1, 1)]  // The number of threads per group
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
@@ -149,23 +173,60 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     BadAppleTexture.GetDimensions(textureDimensions.x, textureDimensions.y);
 
     //this is being called twice, once here and once in the next line, it could be optimized
-    float2 texturePos = FindTexturePosFromMatrix(instancePositions[id.x]);
 
-    float centerDensity = GetDensityAtNextPosition(instancePositions[id.x], float3(0,0,0), textureDimensions);
+    float2 texturePos = FindTexturePosFromMatrix(instancePositions[id.x], textureDimensions);
+
+    uint centerDensity = GetDensityAtNextPosition(instancePositions[id.x], float3(0,0,0), textureDimensions);
 
     float3 currForward = GetZForwardFromMatrix(instancePositions[id.x]);
 
     float3 accumulatedDirection = float3(0,0,0);//float3(instancePositions[id.x]._13,instancePositions[id.x]._23,instancePositions[id.x]._33);  // Extract the third column (forward vector)
     if(centerDensity == -1){
         //currently in illegal area (happens when bad apple color swaps), ignore density and speed towards legal area
+
         accumulatedDirection = GetDirectionTowardsLegalSpace(texturePos, textureDimensions);
+        //accumulatedDirection *= 1 + (((id.x + 1)/10000)*timeBuffer[0]);
         //accumulatedDirection = float3(-instancePositions[id.x]._14,-instancePositions[id.x]._24,-instancePositions[id.x]._34);
     }else{
         //in legal area, take density into account and steer
         //TODO: Implement steering
         //for now, randomize direction when next step will be in illegal space 
-        float nextDensity = GetDensityAtNextPosition(instancePositions[id.x], currForward * timeBuffer[0], textureDimensions);
-        if(nextDensity == -1){
+        //float nextDensity = GetDensityAtNextPosition(instancePositions[id.x], currForward * timeBuffer[0], textureDimensions);
+        //float backDensity = GetDensityAtNextPosition(instancePositions[id.x], currForward * -timeBuffer[0], textureDimensions);
+        uint minDensity = 4000000;
+        for(int i = 0; i < 8; i++){
+            float2 checkDir2D = Rotate2D(float2(currForward.x, currForward.z), 45 * i);
+            float3 checkDir = float3(checkDir2D.x, 0, checkDir2D.y);
+            uint foundDensity = GetDensityAtNextPosition(instancePositions[id.x], checkDir * timeBuffer[0] * instanceTraits[id.x].g * instanceTraits[id.x].b, textureDimensions);
+            //based on difference in angle, lerp between density and density^2
+            float angleDifference = AngleBetweenVectors(checkDir, currForward);
+            angleDifference = smoothstep(0, 2*3.14159, angleDifference);
+            foundDensity = lerp(foundDensity, pow(foundDensity, instanceTraits[id.x].r), angleDifference);
+            if(foundDensity < minDensity && foundDensity != -1){
+                minDensity = foundDensity;
+                accumulatedDirection = lerp(currForward, checkDir, 3 * timeBuffer[0]);
+            }
+        }
+        /*
+        //close to max uint value
+        uint minDensity = 4000000;
+        uint maxSteps = 50;
+        float turnFraction = 1.618033;
+        for(int i = 0; i < maxSteps; i++){
+            float dst = i / (maxSteps - 1);
+            float angle = 2 * 3.1415926 * turnFraction * i;
+            float x = dst * cos(angle);
+            float y = dst * sin(angle);
+            float3 dir = float3(x,0,y);
+
+            float foundDensity = GetDensityAtNextPosition(instancePositions[id.x], dir * timeBuffer[0], textureDimensions);
+            if(foundDensity < minDensity && foundDensity != -1){
+                minDensity = foundDensity;
+                accumulatedDirection = dir;
+            }
+        }
+        /*
+        if(nextDensity > backDensity || nextDensity == -1){
             //accumulatedDirection = currForward;
             float angle = 2.0 * 3.14159 * frac(sin(timeBuffer[0] * 43758.5453) * 10000.0); // Random angle
             //float radius = uv.y; // Random magnitude
@@ -181,7 +242,7 @@ void CSMain (uint3 id : SV_DispatchThreadID)
             accumulatedDirection = randomDirection3D;
         }else{
             accumulatedDirection = currForward;
-        }
+        }*/
     }
     
     
@@ -190,15 +251,69 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     //accumulatedDirection = float3(0,0,0);
     //translate towards Z-forward
     float3 forward = accumulatedDirection;  // Extract the third column (forward vector)
-    float3 translation = forward * timeBuffer[0];
+    float3 translation = forward * timeBuffer[0] * instanceTraits[id.x].g;
     instancePositions[id.x]._14 += translation.x;
-    //y should be used, if it is something is wrong
+    //y should not be used, if it is something is wrong
     instancePositions[id.x]._24 += translation.y;
     instancePositions[id.x]._34 += translation.z;
+
+    //for debugging density texture
+    //instancePositions[id.x]._14 = DensityTexture[texturePos];
+
+}
+/*
+float GetInfluence(float4x4 instance, float2 texturePos, float influenceRadius){
+    float2 instanceTexturePos = FindTexturePosFromMatrix(instance, DensityTexture);
+    float dist = length(texturePos - instanceTexturePos);
+    return smoothstep(0,influenceRadius, influenceRadius - dist);
+}*/
+
+//one thread for each instance
+[numthreads(64, 1, 1)]  // The number of threads per group
+void CSMain2 (uint3 id : SV_DispatchThreadID)
+{
+    if(id.x < instanceCount){
+
+        //new better approach with thread per instance
+        uint2 textureDimensions;
+        DensityTexture.GetDimensions(textureDimensions.x, textureDimensions.y);
+
+        float2 texturePos = FindTexturePosFromMatrix(instancePositions[id.x], textureDimensions);
+        float influenceRadius = 40;
+
+        //make a square around the sphere of influence to loop through
+        float2 minPixel = float2(texturePos.x - influenceRadius, texturePos.y - influenceRadius);
+        float2 maxPixel = float2(texturePos.x + influenceRadius, texturePos.y + influenceRadius);
+
+        //clamp to texture bounds
+
+        minPixel = float2(clamp(minPixel.x, 0, textureDimensions.x), clamp(minPixel.y, 0, textureDimensions.y));
+        maxPixel = float2(clamp(maxPixel.x, 0, textureDimensions.x), clamp(maxPixel.y, 0, textureDimensions.y));
+
+        //loop through pixels in bounding box of sphere of influence
+        for(int i = minPixel.x; i <= maxPixel.x; i++){
+            for(int j = minPixel.y; j <= maxPixel.y; j++){
+                float dist = length(float2(i,j) - texturePos);
+                float density = smoothstep(0,influenceRadius, influenceRadius - dist);
+                uint intDensity = (int)(density * 5);
+                if(intDensity > 0){
+                    InterlockedAdd(DensityTexture[float2(i,j)], intDensity);
+                }
+            }
+        }
+    }
     
-    
-    
-    
+     
+}
+
+[numthreads(8, 8, 1)]  // The number of threads per group
+void VisualizeDensityMap (uint3 id : SV_DispatchThreadID){
+    uint2 textureDimensions;
+    DensityVisualizeTexture.GetDimensions(textureDimensions.x, textureDimensions.y);
+    if(id.x < textureDimensions.x && id.y < textureDimensions.y){
+        int density = DensityTexture[id.xy];
+        DensityVisualizeTexture[id.xy] = float4((float)density/50, 0,0, 1);
+    }
     
 }
 
