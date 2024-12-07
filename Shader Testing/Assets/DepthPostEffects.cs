@@ -99,7 +99,7 @@ public class DepthPostEffects : MonoBehaviour
         //make the pixel that is furthest from the edge the center.
         int pixelCount = maskRT.width * maskRT.height;
         //color buffer to hold each possible color
-        ComputeBuffer outputBuffer = new ComputeBuffer(BoidColorList.Count, sizeof(long));
+        ComputeBuffer outputBuffer = new ComputeBuffer(BoidColorList.Count, sizeof(uint));
         //each return val will have the screen coords x and y and distance from edge val
         ComputeBuffer colorBuffer = new ComputeBuffer(BoidColorList.Count, sizeof(float)*4);
         colorBuffer.SetData(BoidColorList.ToArray());
@@ -153,7 +153,7 @@ public class DepthPostEffects : MonoBehaviour
         postEffectMaterial.SetFloat("_CircleCount", BoidColorList.Count);
 
         //remove this if compute -> frag isn't working
-        //postEffectMaterial.SetBuffer("ResultBuffer", outputBuffer);
+        postEffectMaterial.SetBuffer("ResultBuffer", outputBuffer);
 
        
 

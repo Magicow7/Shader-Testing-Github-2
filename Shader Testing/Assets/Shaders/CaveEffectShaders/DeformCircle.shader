@@ -54,7 +54,7 @@ Shader "Custom/DeformCircle"
             float2 _CirclePositions[MAX_ARRAY_LENGTH];
             float _CircleRadii[MAX_ARRAY_LENGTH];
             int _CircleCount;
-            //StructuredBuffer<uint> ResultBuffer;
+            StructuredBuffer<uint> ResultBuffer;
 
             v2f vert (appdata v)
             {
@@ -109,6 +109,20 @@ Shader "Custom/DeformCircle"
                 return uv - dir * offset;
             }
 
+            float3 DecodeData(uint number){
+                float rad = (number >> (32-10)) & 0x3FF;
+                //get in worlds
+                float yPos = (float)((number >> (32-21)) & 0x3FF);///maskRT.height;
+                float xPos = (float)((number >> (32-32)) & 0x3FF);///maskRT.width;
+                //to avoid weird feet artifact cull small circles
+                if(rad <= 3){
+                    rad = 0;
+                    yPos = 0;
+                    xPos = 0;
+                }
+                return float3(xPos, yPos, rad);
+            }
+
             
 
             fixed4 frag (v2f i) : SV_Target
@@ -134,18 +148,23 @@ Shader "Custom/DeformCircle"
                 float2 pixelPos = i.uv * textureSize;
 
                 //float2 center =  _CirclePos.xy+float2(0.5, 0.5);
-                float distance = length(pixelPos - _CirclePositions[0].xy);
+                int3 decodedPosAndRad = DecodeData(ResultBuffer[0]);
+                //return float4(decodedPosAndRad.r, decodedPosAndRad.g, decodedPosAndRad.b, 1);
+                float distance = length(pixelPos - decodedPosAndRad.xy);
                 int respectiveCircleIndex = 0;
                 for(int j = 1; j < _CircleCount; j++){
-                    float temp = length(pixelPos - _CirclePositions[j].xy);
+                    decodedPosAndRad = DecodeData(ResultBuffer[j]);
+                    float temp = length(pixelPos - decodedPosAndRad.xy);
                     if(temp < distance){
                         respectiveCircleIndex = j;
                         distance = temp;
                     }
                 }
-                float2 choosenCirclePos = _CirclePositions[respectiveCircleIndex];
+                decodedPosAndRad = DecodeData(ResultBuffer[respectiveCircleIndex]);
+                float2 choosenCirclePos = decodedPosAndRad.xy;
                 //abritrarily add to radius to make circles closer to eachother
-                float choosenCircleRad = _CircleRadii[respectiveCircleIndex] + 10;
+                float choosenCircleRad = decodedPosAndRad.z + 10;
+                //return float4(choosenCirclePos.x, choosenCirclePos.y, choosenCircleRad, 1);
 
                 distance = smoothstep(0,choosenCircleRad,distance);
                 //return distance;//float4(i.uv.x,pixelPos.y*_MainTex_TexelSize.y,0,1);    
