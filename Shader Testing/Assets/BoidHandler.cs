@@ -11,6 +11,8 @@ public class BoidHandler : MonoBehaviour
     public GameObject stalkPoint;
     private const float G = 500f;
 
+    public int bpm = 100;
+
     public GameObject boidObject;
 
     public GameObject[] body;
@@ -24,6 +26,7 @@ public class BoidHandler : MonoBehaviour
     public float speed;
 
     public float maxVelocity;
+    private float effectiveMaxVelocity;
 
     public float maxRetreatingVelocity;
 
@@ -58,6 +61,11 @@ public class BoidHandler : MonoBehaviour
     TrailRenderer trailRenderer;
 
     public Material CircleDeformMat;
+
+    public GameObject light;
+    public Vector2 lightWaitTimes;
+
+    private bool inVision = false;
 
     struct BodyProperty // why struct?
 
@@ -201,10 +209,21 @@ public class BoidHandler : MonoBehaviour
 
     }
 
-
+    float timePassed = 0;
+    bool step = false;
     void FixedUpdate()
-
     {
+        step = false;
+        bpm = WebReader.instance.heartrate;
+        timePassed += Time.deltaTime;
+        if(timePassed >= 60f/bpm){
+            timePassed -= 60f/bpm;
+            step = true;
+            AudioHandler.instance.PlayHeartbeat(playerCam.transform.position);
+            effectiveMaxVelocity = maxVelocity * ((float)bpm / 100f);
+            
+            
+        }
         float minDist = 1000;
 
         for (int i = 0; i < numberOfSphere; i++)
@@ -214,15 +233,19 @@ public class BoidHandler : MonoBehaviour
             bp[i].acceleration = Vector3.zero;
         }
 
-
+        inVision = false;
         for (int i = 0; i < numberOfSphere; i++)
         {
             float dist = Vector3.Distance(body[i].transform.position, playerCam.transform.position);
-            if(dist < minDist){
-                minDist = dist;
-            }
+            
             //set scariness based on distance
-
+            if(IsPositionInView(playerCam, body[i].transform.position) && 
+                Vector3.Distance(body[i].transform.position, playerCam.transform.position) < visionDistance){
+                inVision = true;
+                if(dist < minDist){
+                    minDist = dist;
+                }  
+            }
             if(bp[i].retreating == false){
                 bp[i].retreating = IsPositionInView(playerCam, body[i].transform.position) && 
                 Vector3.Distance(body[i].transform.position, playerCam.transform.position) < visionDistance;
@@ -262,20 +285,31 @@ public class BoidHandler : MonoBehaviour
             bp[i].velocity += bp[i].acceleration * Time.deltaTime;
 
             //clamp velocity
-            if(bp[i].velocity.magnitude > maxVelocity && !bp[i].retreating){
-                bp[i].velocity = bp[i].velocity.normalized * maxVelocity;
+            if(bp[i].velocity.magnitude > effectiveMaxVelocity && !bp[i].retreating){
+                bp[i].velocity = bp[i].velocity.normalized * effectiveMaxVelocity;
             }
 
             if(bp[i].velocity.magnitude > maxRetreatingVelocity && bp[i].retreating){
                 bp[i].velocity = bp[i].velocity.normalized * maxRetreatingVelocity;
             }
             //Debug.Log(bp[i].velocity.magnitude);
-
-            body[i].transform.position += bp[i].velocity * Time.deltaTime;
+            if(step){
+                StartCoroutine(LerpBoid(body[i], body[i].transform.position, body[i].transform.position + bp[i].velocity * 60f/bpm, 30f/bpm));
+            }
+            
 
         }
 
         UpdateDeformMesh(minDist);
+
+
+        if(inVision){
+            AudioHandler.instance.PlayWhispers(false, minDist, playerCam.transform.position, playerCam.transform.forward);
+            //this feature looked bad
+            //StartCoroutine(LightBlink());
+        }else{
+            AudioHandler.instance.PlayWhispers(true, minDist, playerCam.transform.position, playerCam.transform.forward);
+        }
         /*
         Camera.main.transform.position = body[0].transform.position;
         Camera.main.transform.LookAt(body[0].transform.position + bp[0].velocity);*/
@@ -288,6 +322,15 @@ public class BoidHandler : MonoBehaviour
         }
         postEffectsController.metaballs = m;*/
 
+    }
+
+    private IEnumerator LerpBoid(GameObject boidBody, Vector3 startPos, Vector3 endPos, float time){
+        float passedTime = 0;
+        while(passedTime < time){
+            passedTime += Time.deltaTime;
+            boidBody.transform.position = Vector3.Lerp(startPos, endPos, passedTime/time);
+            yield return 0;
+        }
     }
 
     private void UpdateDeformMesh(float minDist){
@@ -395,6 +438,13 @@ public class BoidHandler : MonoBehaviour
 
         // Check if the position is in front of the camera and within the viewport boundaries
         return viewportPoint.z > 0 && viewportPoint.x >= 0 && viewportPoint.x <= 1 && viewportPoint.y >= 0 && viewportPoint.y <= 1;
+    }
+
+    private IEnumerator LightBlink(){
+        yield return new WaitForSeconds(lightWaitTimes.x);
+        light.GetComponent<Light>().intensity /= 2;
+        yield return new WaitForSeconds(lightWaitTimes.y);
+        light.GetComponent<Light>().intensity *= 2;
     }
 
    

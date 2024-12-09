@@ -1,11 +1,15 @@
 using UnityEngine;
 using System.Collections;
 using UnityEngine.Networking;
+using TMPro;
 public class WebReader : MonoBehaviour
 {
+    public static WebReader instance;
+    public TextMeshProUGUI bpmText;
 
     public int heartrate = 0;
     void Start() {
+        instance = this;
         StartCoroutine(GetText());
     }
  
@@ -25,6 +29,7 @@ public class WebReader : MonoBehaviour
             {
                 //Debug.Log("Response: " + request.downloadHandler.text);
                 heartrate = int.Parse(request.downloadHandler.text);
+                bpmText.text = heartrate.ToString() + " bpm";
             }
             else
             {
